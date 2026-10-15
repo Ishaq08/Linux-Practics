@@ -1,6 +1,6 @@
 # Linux for DevOps Notes
 
-Beginner notes on Linux: the filesystem and basic commands (Day 1), users, groups, permissions and ownership (Day 2), processes, signals, services and logs (Day 3), and disk, memory, CPU and filesystems (Day 4).
+Beginner notes on Linux: the filesystem and basic commands (Day 1), users, groups, permissions and ownership (Day 2), processes, signals, services and logs (Day 3), disk, memory, CPU and filesystems (Day 4), and networking, SSH and firewall basics (Day 5).
 
 ## Table of Contents
 
@@ -50,6 +50,20 @@ Beginner notes on Linux: the filesystem and basic commands (Day 1), users, group
 - [Pass Condition (Day 4)](#pass-condition-day-4)
 - [Lessons Learned](#lessons-learned)
 - [Quick Reference (Day 4)](#quick-reference-day-4)
+
+**Day 5: Networking, SSH and Firewall Basics**
+- [Network Basics](#network-basics)
+- [Connectivity Testing](#connectivity-testing)
+- [Ports and Sockets](#ports-and-sockets)
+- [DNS](#dns)
+- [HTTP with curl](#http-with-curl)
+- [SSH](#ssh)
+- [Firewall Basics](#firewall-basics)
+- [Network Troubleshooting](#network-troubleshooting)
+- [Lab Exercises (Day 5)](#lab-exercises-day-5)
+- [Self-Check Questions (Day 5)](#self-check-questions-day-5)
+- [Pass Condition (Day 5)](#pass-condition-day-5)
+- [Quick Reference (Day 5)](#quick-reference-day-5)
 
 ---
 
@@ -1142,3 +1156,391 @@ I can find what is filling a disk, tell whether a slow server is short of CPU, m
 
 **Previous:** Day 3: Processes, Signals, Services and Logs
 **Next:** Day 5: Networking (ports, DNS, SSH, `curl`, `ip`, `ss`, firewall basics)
+
+---
+
+# Day 5: Networking, SSH and Firewall Basics
+
+Day 5 of the 7-day Linux and server administration plan. It covers how to check a server's network configuration, test connectivity, inspect ports and DNS, make HTTP requests, log in remotely with SSH, and control traffic with a firewall.
+
+## Topics Covered (Day 5)
+
+- Addresses and routes: `ip`
+- Connectivity: `ping`, `traceroute`
+- Ports and sockets: `ss`, `nc`
+- DNS: `dig`, `/etc/resolv.conf`, `/etc/hosts`
+- HTTP: `curl`
+- Remote access: SSH, keys, `scp`
+- Firewall basics: `ufw`, `firewalld`
+
+---
+
+## Network Basics
+
+```bash
+ip addr                 # IP addresses (short form: ip a)
+ip -br a                # brief, one line per interface
+ip route                # routing table
+ip route | grep default # default gateway
+ip link                 # interfaces and their state
+ip neigh                # ARP table (neighbours on the LAN)
+hostname -I             # all IPs of this host
+```
+
+### Key concepts
+
+- **IP address**: the address of a host (for example `192.168.1.10`).
+- **Gateway**: the router that traffic leaves through to reach other networks. It is the `default via ...` line in `ip route`.
+- **Loopback (`127.0.0.1`, `localhost`)**: the machine talking to itself.
+- **Private ranges**: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`. These are not routable on the internet.
+- **CIDR**: `192.168.1.0/24` means the first 24 bits are the network, so 256 addresses.
+
+---
+
+## Connectivity Testing
+
+```bash
+ping -c 4 8.8.8.8          # 4 packets, by IP
+ping -c 4 example.com      # by name (also tests DNS)
+traceroute example.com     # path to the host (package traceroute)
+tracepath example.com      # similar, usually preinstalled
+```
+
+### The ping ladder
+
+Test from the inside out, and stop at the first failure:
+
+| Step | Command | If it fails |
+|------|---------|-------------|
+| 1. Local stack | `ping -c 2 127.0.0.1` | Network stack is broken |
+| 2. Gateway | `ping -c 2 <gateway IP>` | Local link or Wi-Fi/cable problem |
+| 3. Internet by IP | `ping -c 2 8.8.8.8` | Routing or ISP problem |
+| 4. Internet by name | `ping -c 2 example.com` | DNS problem |
+
+> Some hosts block ICMP, so a failed `ping` does not always mean the host is down. Confirm with `curl` or `nc`.
+
+---
+
+## Ports and Sockets
+
+A **port** identifies a service on a host. An address plus a port, such as `10.0.0.5:443`, is a **socket**.
+
+| Port | Service |
+|------|---------|
+| 22 | SSH |
+| 53 | DNS |
+| 80 | HTTP |
+| 443 | HTTPS |
+| 3306 | MySQL |
+| 5432 | PostgreSQL |
+
+Ports below 1024 are privileged, so only root can listen on them.
+
+```bash
+sudo ss -tlnp                 # listening TCP ports with the process
+sudo ss -tunap                # all TCP/UDP sockets with processes
+ss -s                         # summary
+ss -tn state established      # active connections
+sudo ss -tlnp | grep :80      # who is on port 80?
+sudo lsof -i :80              # alternative
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-t` / `-u` | TCP / UDP |
+| `-l` | Listening sockets only |
+| `-n` | Numeric (no name lookups) |
+| `-p` | Show the process (needs `sudo` for other users' processes) |
+| `-a` | All sockets |
+
+### Reading the listen address
+
+| Local address | Meaning |
+|---------------|---------|
+| `127.0.0.1:5432` | Reachable **only from this machine** |
+| `0.0.0.0:80` | All IPv4 interfaces |
+| `[::]:80` | All IPv6 interfaces (often IPv4 too) |
+| `192.168.1.10:80` | One specific interface |
+
+A service listening only on `127.0.0.1` cannot be reached from another machine, however open the firewall is.
+
+### Test a remote port
+
+```bash
+nc -zv example.com 443                                 # netcat: -z scan, -v verbose
+timeout 3 bash -c '</dev/tcp/example.com/443' && echo open   # no extra tools
+```
+
+> `netstat` is the older tool (package `net-tools`). Prefer `ss`.
+
+---
+
+## DNS
+
+DNS turns names into IP addresses.
+
+```bash
+dig example.com                # full answer
+dig +short example.com         # just the IPs
+dig example.com MX             # mail servers
+dig @8.8.8.8 example.com       # ask a specific DNS server
+nslookup example.com           # older alternative
+getent hosts example.com       # what the system resolver returns
+```
+
+`dig` is in the package `dnsutils` (`bind-utils` on RHEL).
+
+| Record | Purpose |
+|--------|---------|
+| A / AAAA | Name to IPv4 / IPv6 address |
+| CNAME | Alias to another name |
+| MX | Mail server |
+| NS | Name servers of the domain |
+| TXT | Free text (SPF, verification) |
+
+### Where the system looks up names
+
+| File | Purpose |
+|------|---------|
+| `/etc/hosts` | Manual name-to-IP entries, checked first |
+| `/etc/resolv.conf` | Which DNS server to ask (on Ubuntu this is often `127.0.0.53`, the local resolver) |
+| `/etc/nsswitch.conf` | The order: files (`/etc/hosts`) then DNS |
+
+```bash
+resolvectl status              # DNS servers in use (systemd-resolved)
+cat /etc/hosts
+```
+
+> `dig` queries DNS directly and ignores `/etc/hosts`. Use `getent hosts name` to see what applications will actually get.
+
+---
+
+## HTTP with curl
+
+```bash
+curl https://example.com                   # fetch a page
+curl -I https://example.com                # headers only
+curl -v https://example.com                # verbose: DNS, TLS, request, response
+curl -s -o /dev/null -w "%{http_code}\n" https://example.com   # just the status code
+curl -L http://example.com                 # follow redirects
+curl -o page.html https://example.com      # save to a file
+curl -X POST -d "name=alice" https://example.com/api
+curl -H "Authorization: Bearer TOKEN" https://example.com/api
+curl --connect-timeout 5 https://example.com
+curl -k https://self-signed.local          # skip TLS verification (testing only)
+```
+
+| Status | Meaning |
+|--------|---------|
+| 200 | OK |
+| 301 / 302 | Redirect |
+| 403 | Forbidden (permissions) |
+| 404 | Not found |
+| 500 | Server error |
+| 502 / 503 | Bad gateway / unavailable (backend down or overloaded) |
+
+### Refused vs timed out vs not resolved
+
+| Error | Usual meaning |
+|-------|---------------|
+| `Could not resolve host` | DNS problem |
+| `Connection refused` | Host reachable, but **nothing is listening** on that port (or a reject rule) |
+| `Connection timed out` | Packets are being **dropped**: firewall, wrong IP or routing |
+
+---
+
+## SSH
+
+**SSH (Secure Shell)** gives an encrypted remote terminal on port 22.
+
+```bash
+ssh alice@192.168.1.10                 # connect
+ssh -p 2222 alice@192.168.1.10         # custom port
+ssh -i ~/.ssh/mykey alice@host         # specific key
+ssh alice@host 'df -h'                 # run one command remotely
+ssh -v alice@host                      # verbose, for debugging
+```
+
+On the first connection SSH shows the server's fingerprint and stores it in `~/.ssh/known_hosts`. If a later connection warns that the host identification has changed, confirm the change is legitimate, then run `ssh-keygen -R host`.
+
+### Key-based login (recommended)
+
+- The **private key** (`~/.ssh/id_ed25519`) stays on your machine. Never share it.
+- The **public key** (`~/.ssh/id_ed25519.pub`) goes on the server.
+
+```bash
+ssh-keygen -t ed25519 -C "your_email@example.com"   # 1. create the key pair
+ssh-copy-id alice@192.168.1.10                      # 2. install the public key
+ssh alice@192.168.1.10                              # 3. log in without a password
+```
+
+The server keeps public keys in `~/.ssh/authorized_keys`. SSH refuses to work if the permissions are too open:
+
+```bash
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/id_ed25519
+```
+
+### Copy files with scp
+
+```bash
+scp file.txt alice@host:/home/alice/       # local to remote
+scp alice@host:/home/alice/file.txt .      # remote to local
+scp -r mydir/ alice@host:/home/alice/      # directory
+```
+
+### Config shortcut
+
+`~/.ssh/config`
+
+```
+Host myserver
+    HostName 192.168.1.10
+    User alice
+    Port 22
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Then connect with `ssh myserver`.
+
+### Hardening the server (`/etc/ssh/sshd_config`)
+
+| Setting | Recommended | Why |
+|---------|-------------|-----|
+| `PermitRootLogin` | `no` | Block direct root login |
+| `PasswordAuthentication` | `no` | Keys only (after confirming key login works) |
+
+```bash
+sudo sshd -t                    # check the config for errors first
+sudo systemctl restart ssh      # service is "ssh" on Ubuntu/Debian, "sshd" on RHEL
+```
+
+> Keep your current session open and test a second login before closing it, so a mistake doesn't lock you out. On recent Ubuntu, SSH may be started by a socket (`ssh.socket`). If a port change doesn't take effect, check `systemctl status ssh.socket`.
+
+### SSH logs
+
+```bash
+sudo journalctl -u ssh -n 50 --no-pager          # Ubuntu/Debian ("sshd" on RHEL)
+sudo grep "Failed password" /var/log/auth.log    # failed logins (Ubuntu/Debian)
+```
+
+---
+
+## Firewall Basics
+
+A firewall decides which traffic is allowed in and out. Rules are matched per port, protocol and source.
+
+### ufw (Ubuntu/Debian)
+
+```bash
+sudo ufw status verbose
+sudo ufw allow OpenSSH              # or: sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw enable
+sudo ufw status numbered
+sudo ufw delete allow 80/tcp
+sudo ufw limit ssh                  # rate-limit SSH attempts
+```
+
+> **Allow SSH before running `ufw enable`.** Otherwise you cut off your own remote session.
+
+### firewalld (RHEL/CentOS)
+
+```bash
+sudo firewall-cmd --list-all
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-port=8080/tcp
+sudo firewall-cmd --reload
+```
+
+### Good to know
+
+- `ufw` and `firewalld` are front-ends for `nftables`/`iptables`. See the raw rules with `sudo nft list ruleset` or `sudo iptables -L -n -v`.
+- A **deny/drop** rule makes clients wait and **time out**. A **reject** rule makes them fail at once with **connection refused**.
+- Cloud providers add their own firewall (security groups). Both the cloud firewall and the server firewall must allow the traffic.
+
+---
+
+## Network Troubleshooting
+
+| Symptom | First checks |
+|---------|--------------|
+| `Could not resolve host` | `dig +short name`, `cat /etc/resolv.conf`, `resolvectl status` |
+| Ping works by IP but not by name | DNS: check the resolver and `/etc/hosts` |
+| `Connection refused` | On the server: `sudo ss -tlnp`, is the service up and on the right address and port? |
+| `Connection timed out` | Firewall (`ufw status`, cloud security group), `ip route`, wrong IP |
+| Website shows 502/503 | Backend service: `systemctl status`, `journalctl -u` |
+| SSH `Permission denied (publickey)` | Key in `authorized_keys`? Permissions 700/600? Right user? `ssh -v` |
+| SSH `Connection refused` | `systemctl status ssh`, `ss -tlnp \| grep :22` |
+
+### Service unreachable from outside: my routine
+
+```bash
+systemctl is-active nginx          # 1. is the service running?
+sudo ss -tlnp | grep :80           # 2. is it listening, and on which address?
+curl -I http://localhost           # 3. does it work locally?
+sudo ufw status                    # 4. does the firewall allow it?
+curl -I http://SERVER_IP           # 5. from another machine
+```
+
+If step 5 still fails, check the cloud security group and any upstream firewall.
+
+---
+
+## Lab Exercises (Day 5)
+
+- [ ] Run `ip -br a` and `ip route`. Identify your IP address and default gateway.
+- [ ] Run the ping ladder (loopback, gateway, `8.8.8.8`, `example.com`) and note where it would break.
+- [ ] Run `dig +short example.com`, then `dig @8.8.8.8 +short example.com`. Compare.
+- [ ] Add a line to `/etc/hosts` (for example `127.0.0.1 myapp.local`) and confirm with `getent hosts myapp.local`. Notice that `dig` does not see it.
+- [ ] Start `python3 -m http.server 8000 --bind 127.0.0.1 &`. Find it with `ss -tlnp`, test with `curl -I http://127.0.0.1:8000`, then stop it with `kill %1`.
+- [ ] With the server stopped, run `curl -I http://127.0.0.1:8000` and read the **connection refused** error.
+- [ ] Print only the status code: `curl -s -o /dev/null -w "%{http_code}\n" https://example.com`.
+- [ ] Generate an SSH key with `ssh-keygen -t ed25519`, install it with `ssh-copy-id`, and log in without a password. Try `ssh -v` to read the handshake.
+- [ ] On a test VM: `sudo ufw allow OpenSSH`, `sudo ufw enable`, add a rule for port 8000, check `ufw status numbered`, then delete the rule.
+
+## Self-Check Questions (Day 5)
+
+1. What is the difference between `Connection refused` and `Connection timed out`?
+2. A service listens on `127.0.0.1:5432`. Why can't another server connect to it?
+3. `ping 8.8.8.8` works but `ping example.com` fails. What is wrong?
+4. What does `ss -tlnp` show, and what does each flag mean?
+5. Why must you allow SSH before enabling `ufw`?
+6. Why does `dig` return a different answer from what an application sees?
+7. Which two files must have strict permissions for key-based SSH to work?
+
+## Pass Condition (Day 5)
+
+I can take a service that cannot be reached, work out whether the cause is DNS, the service, the listen address or a firewall, and fix it.
+
+---
+
+## Quick Reference (Day 5)
+
+| Task | Command |
+|------|---------|
+| IP addresses | `ip -br a` |
+| Default gateway | `ip route \| grep default` |
+| Test connectivity | `ping -c 4 host` |
+| Listening ports | `sudo ss -tlnp` |
+| Who uses a port | `sudo lsof -i :PORT` |
+| Test a remote port | `nc -zv host port` |
+| DNS lookup | `dig +short name` |
+| What the system resolves | `getent hosts name` |
+| HTTP headers | `curl -I url` |
+| HTTP status code only | `curl -s -o /dev/null -w "%{http_code}\n" url` |
+| SSH login | `ssh user@host` |
+| Create SSH key | `ssh-keygen -t ed25519` |
+| Install SSH key | `ssh-copy-id user@host` |
+| Copy a file | `scp file user@host:/path` |
+| Firewall status | `sudo ufw status verbose` |
+| Allow a port | `sudo ufw allow 80/tcp` |
+
+---
+
+**Previous:** Day 4: Disk, Memory, CPU and Filesystems
+**Next:** Day 6

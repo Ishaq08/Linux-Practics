@@ -1,6 +1,6 @@
 # Linux for DevOps Notes
 
-Beginner notes on Linux: the filesystem and basic commands (Day 1), then users, groups, permissions and ownership (Day 2).
+Beginner notes on Linux: the filesystem and basic commands (Day 1), users, groups, permissions and ownership (Day 2), and processes, signals, services and logs (Day 3).
 
 ## Table of Contents
 
@@ -24,7 +24,19 @@ Beginner notes on Linux: the filesystem and basic commands (Day 1), then users, 
 - [sudo and su](#sudo-and-su)
 - [Practice Lab (Day 2)](#practice-lab-day-2)
 - [Interview-Style Questions (Day 2)](#interview-style-questions-day-2)
-- [Quick Reference](#quick-reference)
+- [Quick Reference (Day 2)](#quick-reference-day-2)
+
+**Day 3: Processes, Signals, Services and Logs**
+- [Processes](#processes)
+- [Jobs](#jobs)
+- [Signals](#signals)
+- [Services with systemctl](#services-with-systemctl)
+- [Logs with journalctl](#logs-with-journalctl)
+- [Troubleshooting Routine](#troubleshooting-routine)
+- [Lab Exercises (Day 3)](#lab-exercises-day-3)
+- [Self-Check Questions (Day 3)](#self-check-questions-day-3)
+- [Pass Condition](#pass-condition)
+- [Quick Reference (Day 3)](#quick-reference-day-3)
 
 ---
 
@@ -616,7 +628,7 @@ Alice's existing supplementary groups are replaced by only `devs`.
 
 ---
 
-## Quick Reference
+## Quick Reference (Day 2)
 
 | Task | Command |
 |------|---------|
@@ -635,3 +647,230 @@ Alice's existing supplementary groups are replaced by only `devs`.
 | Recursive change | `chmod -R` / `chown -R` |
 | Switch user | `su - name` |
 | Run as root | `sudo command` |
+
+---
+
+# Day 3: Processes, Signals, Services and Logs
+
+Day 3 of the 7-day Linux and server administration plan. It covers how to inspect running processes, control them with signals, manage services with systemd, and read logs to diagnose failures.
+
+## Topics Covered
+
+- Processes: `ps`, `pgrep`, `pstree`, `top`
+- Jobs: foreground, background, `nohup`
+- Signals: `kill`, `pkill`, `killall`
+- Services: `systemctl`
+- Logs: `journalctl`
+
+---
+
+## Processes
+
+```bash
+ps aux                  # all processes
+ps -ef --forest         # parent/child tree
+pgrep -a nginx          # find PIDs by name
+pstree -p               # tree view with PIDs
+top                     # live view (q to quit)
+```
+
+### Key concepts
+
+- Every process has a **PID** (process ID) and a **PPID** (parent's PID). On systemd systems, PID 1 is `systemd`.
+- A **zombie** is a process that has already finished, but its parent has not yet read its exit status. It is already dead, so it **cannot be killed**. Fix or restart the parent, and the zombie is cleaned up.
+
+| STAT | Meaning |
+|------|---------|
+| `R` | Running |
+| `S` | Sleeping (waiting for an event) |
+| `D` | Uninterruptible sleep, usually waiting on disk I/O |
+| `T` | Stopped |
+| `Z` | Zombie |
+
+### top cheat sheet
+
+| Key | Action |
+|-----|--------|
+| `P` / `M` | Sort by CPU / memory |
+| `1` | Show each CPU core |
+| `k` | Kill a process |
+| `u` | Filter by user |
+| `c` | Show full command line |
+| `q` | Quit |
+
+Scriptable snapshot:
+
+```bash
+top -b -n 1 | head -20
+```
+
+In the `top` header, compare the **load average** with the number of CPU cores. A high `wa` value means the system is waiting on disk I/O.
+
+---
+
+## Jobs
+
+```bash
+sleep 300 &          # run in background
+jobs                 # list jobs
+fg %1                # bring job 1 to the foreground
+bg %1                # resume a paused job in the background
+nohup ./script.sh &  # keep running after logout (output goes to nohup.out)
+```
+
+`Ctrl+Z` pauses the current foreground job. Then `bg %1` resumes it in the background.
+
+---
+
+## Signals
+
+| Signal | Number | Meaning |
+|--------|--------|---------|
+| SIGHUP | 1 | Reload config / terminal closed |
+| SIGINT | 2 | Interrupt (Ctrl+C) |
+| SIGTERM | 15 | Polite terminate (default) |
+| SIGKILL | 9 | Force kill, cannot be caught or ignored |
+
+```bash
+kill PID            # SIGTERM
+kill -9 PID         # SIGKILL (last resort)
+kill -HUP PID       # reload config
+pkill nginx         # by name (pattern match)
+pkill -x nginx      # exact name match only
+pkill -u alice      # all processes of a user
+killall nginx       # all processes with this exact name
+kill -l             # list all signals
+```
+
+**`kill` vs `kill -9`:** `kill` sends SIGTERM, so the process can clean up (close files, remove locks, flush data). `kill -9` sends SIGKILL, which the kernel enforces immediately with no cleanup. Try SIGTERM first.
+
+> Even `kill -9` cannot remove a process stuck in `D` state until its I/O finishes, and it cannot remove a zombie.
+
+---
+
+## Services with systemctl
+
+```bash
+systemctl status nginx
+sudo systemctl start nginx
+sudo systemctl stop nginx
+sudo systemctl restart nginx
+sudo systemctl reload nginx          # reload config, no downtime
+sudo systemctl enable --now nginx    # start at boot and start now
+systemctl is-active nginx
+systemctl is-enabled nginx
+systemctl --failed                   # what is broken?
+```
+
+- **start** runs the service now. **enable** makes it start at boot. They are independent.
+- **restart** stops and starts (new PID, brief downtime). **reload** re-reads the config (same PID, no downtime), but only if the service supports it. Use `reload-or-restart` if you are not sure.
+- After editing a unit file, run `sudo systemctl daemon-reload`.
+
+### Example custom service
+
+Create the content folder first:
+
+```bash
+sudo mkdir -p /srv/hello
+echo "hello" | sudo tee /srv/hello/index.html
+```
+
+`/etc/systemd/system/hello.service`
+
+```ini
+[Unit]
+Description=Hello test service
+
+[Service]
+User=nobody
+WorkingDirectory=/srv/hello
+ExecStart=/usr/bin/python3 -m http.server 8080 --bind 127.0.0.1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hello
+curl http://127.0.0.1:8080
+```
+
+> `WorkingDirectory` matters: without it, a service starts in `/`, so `http.server` would publish the whole filesystem. `User=nobody` and `--bind 127.0.0.1` keep this test service unprivileged and local only.
+
+---
+
+## Logs with journalctl
+
+```bash
+journalctl -u nginx                      # one service
+journalctl -u nginx -n 50 --no-pager     # last 50 lines
+journalctl -u nginx -f                   # follow live
+journalctl -u nginx --since "10 min ago"
+journalctl -p err -b                     # errors since boot
+journalctl --disk-usage
+```
+
+**systemctl vs journalctl:** `systemctl` controls and inspects services. `journalctl` reads their logs.
+
+---
+
+## Troubleshooting Routine
+
+When a service is `failed`:
+
+1. `systemctl status SERVICE` shows the state, exit code and last log lines.
+2. `journalctl -u SERVICE -n 50 --no-pager` shows the full reason.
+3. Validate the config (for example `nginx -t`) and check ports with `ss -tlnp`.
+4. Also check file permissions and free disk space (`df -h`).
+5. Fix the problem, run `sudo systemctl restart SERVICE`, and verify with `systemctl is-active SERVICE`.
+
+---
+
+## Lab Exercises (Day 3)
+
+- [ ] Start `sleep 1000 &`, find it with `ps` and `pgrep`, and kill it with SIGTERM.
+- [ ] Start a process that ignores SIGTERM: `bash -c "trap '' TERM; while true; do sleep 1; done" &`. Confirm `kill PID` has no effect and `kill -9 PID` works.
+- [ ] Create `hello.service`, kill its process with `kill -9`, and watch `Restart=on-failure` bring it back with a new PID.
+- [ ] Install nginx (`sudo apt install nginx`), break its config, read the error in `journalctl`, fix it and restart.
+- [ ] Run `systemctl --failed` and `journalctl -p err -b` to find other problems.
+- [ ] Run `yes > /dev/null &`, spot it in `top`, and kill it.
+
+## Self-Check Questions (Day 3)
+
+1. What is the difference between `kill` and `kill -9`?
+2. What is a zombie process, and can you kill it?
+3. What is the difference between `restart` and `reload`?
+4. A service shows `failed`. What are your next three commands?
+5. What does `enable` do compared with `start`?
+
+## Pass Condition
+
+I can take a broken service, find the reason in the logs, fix it and restore it without following a tutorial.
+
+---
+
+## Quick Reference (Day 3)
+
+| Task | Command |
+|------|---------|
+| List all processes | `ps aux` |
+| Find a PID by name | `pgrep -a name` |
+| Live process view | `top` |
+| Run in background | `command &` |
+| Stop a process politely | `kill PID` |
+| Force kill | `kill -9 PID` |
+| Kill by name | `pkill name`, `killall name` |
+| Service status | `systemctl status name` |
+| Start / stop / restart | `sudo systemctl start\|stop\|restart name` |
+| Start at boot and now | `sudo systemctl enable --now name` |
+| List failed services | `systemctl --failed` |
+| Service logs | `journalctl -u name -n 50 --no-pager` |
+| Follow logs live | `journalctl -u name -f` |
+| Errors since boot | `journalctl -p err -b` |
+
+---
+
+**Previous:** Day 2: Users, Groups and Permissions
+**Next:** Day 4: Disk, Memory, CPU and Filesystems (`df`, `du`, `free`, `uptime`, `vmstat`)

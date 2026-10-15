@@ -1,6 +1,6 @@
 # Linux for DevOps Notes
 
-Beginner notes on Linux: the filesystem and basic commands (Day 1), users, groups, permissions and ownership (Day 2), and processes, signals, services and logs (Day 3).
+Beginner notes on Linux: the filesystem and basic commands (Day 1), users, groups, permissions and ownership (Day 2), processes, signals, services and logs (Day 3), and disk, memory, CPU and filesystems (Day 4).
 
 ## Table of Contents
 
@@ -35,8 +35,21 @@ Beginner notes on Linux: the filesystem and basic commands (Day 1), users, group
 - [Troubleshooting Routine](#troubleshooting-routine)
 - [Lab Exercises (Day 3)](#lab-exercises-day-3)
 - [Self-Check Questions (Day 3)](#self-check-questions-day-3)
-- [Pass Condition](#pass-condition)
+- [Pass Condition (Day 3)](#pass-condition-day-3)
 - [Quick Reference (Day 3)](#quick-reference-day-3)
+
+**Day 4: Disk, Memory, CPU and Filesystems**
+- [Disk Space](#disk-space)
+- [Block Devices and Filesystems](#block-devices-and-filesystems)
+- [Memory](#memory)
+- [CPU and Load](#cpu-and-load)
+- [vmstat](#vmstat)
+- [Troubleshooting Guide](#troubleshooting-guide)
+- [Lab Exercises (Day 4)](#lab-exercises-day-4)
+- [Self-Check Questions (Day 4)](#self-check-questions-day-4)
+- [Pass Condition (Day 4)](#pass-condition-day-4)
+- [Lessons Learned](#lessons-learned)
+- [Quick Reference (Day 4)](#quick-reference-day-4)
 
 ---
 
@@ -654,7 +667,7 @@ Alice's existing supplementary groups are replaced by only `devs`.
 
 Day 3 of the 7-day Linux and server administration plan. It covers how to inspect running processes, control them with signals, manage services with systemd, and read logs to diagnose failures.
 
-## Topics Covered
+## Topics Covered (Day 3)
 
 - Processes: `ps`, `pgrep`, `pstree`, `top`
 - Jobs: foreground, background, `nohup`
@@ -845,7 +858,7 @@ When a service is `failed`:
 4. A service shows `failed`. What are your next three commands?
 5. What does `enable` do compared with `start`?
 
-## Pass Condition
+## Pass Condition (Day 3)
 
 I can take a broken service, find the reason in the logs, fix it and restore it without following a tutorial.
 
@@ -874,3 +887,258 @@ I can take a broken service, find the reason in the logs, fix it and restore it 
 
 **Previous:** Day 2: Users, Groups and Permissions
 **Next:** Day 4: Disk, Memory, CPU and Filesystems (`df`, `du`, `free`, `uptime`, `vmstat`)
+
+---
+
+# Day 4: Disk, Memory, CPU and Filesystems
+
+Day 4 of the 7-day Linux and server administration plan. It covers how to check disk space, memory, CPU load and I/O, and how to tell which resource is the bottleneck on a slow or full server.
+
+## Topics Covered (Day 4)
+
+- Disk space: `df`, `du`, `find`, `lsof`
+- Block devices and mounts: `lsblk`, `mount`, `findmnt`, `/etc/fstab`
+- Memory: `free`
+- CPU and load: `uptime`, `nproc`, `lscpu`
+- System activity: `vmstat`, `iostat`
+
+---
+
+## Disk Space
+
+```bash
+df -h                                   # space per filesystem
+df -i                                   # inode usage
+df -hT                                  # include filesystem type
+du -sh /var/log                         # size of one directory
+sudo du -xh / --max-depth=1 | sort -h   # biggest directories (-x = stay on one filesystem)
+```
+
+### Find large files
+
+```bash
+sudo find / -xdev -type f -size +500M 2>/dev/null
+sudo find /var/log -type f -mtime +30
+ls -lhS /var/log | head
+```
+
+### Key concepts
+
+- `df` reports at the **filesystem** level. `du` adds up **files and directories**.
+- If `df` shows far more used than `du`, a **deleted file is usually still held open** by a process. Find it with `sudo lsof +L1`, then restart that process.
+- A disk can be full while space is free if **inodes** run out (`df -i` shows `IUse% 100%`).
+- Ignore `tmpfs` and `udev` lines. They are RAM-backed.
+
+---
+
+## Block Devices and Filesystems
+
+```bash
+lsblk              # disks, partitions, mount points
+lsblk -f           # plus filesystem type and UUID
+findmnt            # tree of mounts
+cat /etc/fstab     # mounts applied at boot
+sudo blkid         # UUIDs
+```
+
+### Mount a new disk
+
+```bash
+lsblk                          # 1. identify the new disk and double-check its name
+sudo mkfs.ext4 /dev/sdb1       # 2. create a filesystem (ERASES everything on it)
+sudo mkdir /mnt/data           # 3. create a mount point
+sudo mount /dev/sdb1 /mnt/data # 4. mount it
+sudo umount /mnt/data          # unmount when finished
+```
+
+> `/dev/sdb1` assumes the disk already has a partition. A brand-new disk must be partitioned first (with `fdisk` or `parted`). Always confirm the device name with `lsblk` before `mkfs`, because formatting the wrong device destroys its data.
+
+### Why UUIDs in `/etc/fstab`?
+
+Device names like `/dev/sdb1` can change between boots (new disk, boot order, USB drive). A UUID is stored in the filesystem itself, so the correct disk is always mounted. Get yours from `sudo blkid` and replace the placeholder below:
+
+```
+UUID=3f2a1c9e-xxxx-xxxx-xxxx-9b7d4e6a1f20  /mnt/data  ext4  defaults,nofail  0  2
+```
+
+| Field | Example | Meaning |
+|-------|---------|---------|
+| Device | `UUID=...` | What to mount |
+| Mount point | `/mnt/data` | Where to mount it |
+| Type | `ext4` | Filesystem type |
+| Options | `defaults,nofail` | Mount options |
+| Dump | `0` | Backup flag (almost always 0) |
+| Fsck order | `2` | Check order at boot: 1 for root, 2 for others, 0 to skip |
+
+- Test with `sudo mount -a` before rebooting. A bad line can drop the machine into emergency mode.
+- Add `nofail` for non-essential disks so a missing disk doesn't block boot.
+
+---
+
+## Memory
+
+```bash
+free -h
+```
+
+- **free** is completely unused RAM.
+- **available** is what programs can actually use (free RAM plus cache that can be released). **Read this one.**
+- Linux uses spare RAM as cache (`buff/cache`), so low "free" is normal.
+- Swap in use is not automatically a problem. **Active swapping** (non-zero `si`/`so` in `vmstat`) means memory pressure.
+- Top memory users: `ps aux --sort=-%mem | head`
+- Check for the OOM killer (out-of-memory killer):
+
+```bash
+sudo journalctl -k | grep -i "out of memory"
+sudo dmesg | grep -i oom
+```
+
+---
+
+## CPU and Load
+
+```bash
+uptime            # load average: 1, 5, 15 minutes
+nproc             # number of cores
+lscpu             # CPU details
+```
+
+Compare load average with the core count:
+
+| Load vs cores | Meaning |
+|---------------|---------|
+| Below core count | Fine |
+| Equal | Fully busy |
+| Well above (e.g. 8 on 4 cores) | Demand is double capacity, processes are queuing |
+
+The three numbers are the 1, 5 and 15 minute averages, so check the trend: `8, 4, 2` is rising and `2, 4, 8` is recovering.
+
+> On Linux, load average counts processes waiting on **disk I/O** (`D` state) as well as processes waiting for CPU. So high load with a mostly idle CPU often points to a disk problem.
+
+**High load, then what?** Use `top` (press `P`, then `1`) and `vmstat 2`.
+
+- High `us`/`sy`: CPU-bound. Find the process and fix or stop it.
+- Low CPU but high `wa`: processes are stuck waiting on disk. Check `iostat -x` and `iotop`.
+
+---
+
+## vmstat
+
+```bash
+vmstat 2 5        # every 2 seconds, 5 samples
+```
+
+| Column | Meaning | Watch for |
+|--------|---------|-----------|
+| `r` | Runnable processes (running or waiting for CPU) | Consistently above core count |
+| `b` | Processes blocked on I/O | Above 0 for long |
+| `si` / `so` | Swap in / out | Non-zero means memory pressure |
+| `bi` / `bo` | Blocks read / written | Heavy disk activity |
+| `us` / `sy` | User / kernel CPU | High means CPU-bound |
+| `id` | Idle | Near 0 means CPU-bound |
+| `wa` | I/O wait | High means a disk bottleneck |
+
+The first line is the average since boot, so ignore it.
+
+**High `wa`** means the CPU is idle while waiting on disk I/O, so the disk is the bottleneck and adding CPU won't help. Use `iostat -x 2` (package `sysstat`) for per-disk stats and `sudo iotop` (package `iotop`) to find the process.
+
+---
+
+## Troubleshooting Guide
+
+| Symptom | First checks |
+|---------|--------------|
+| "No space left on device" | `df -h`, `df -i`, `du` drill-down, `lsof +L1` |
+| System slow | `uptime`, `top`, `vmstat 2` (CPU, memory or I/O?) |
+| High `wa` | `iostat -x`, `iotop`, `df -h` |
+| Process disappeared | `journalctl -k \| grep -i oom` |
+| Swap growing | `free -h`, `ps aux --sort=-%mem` |
+
+### Server at 100% disk: five commands
+
+```bash
+df -h                                    # which filesystem is full?
+df -i                                    # or are inodes exhausted?
+sudo du -xh / --max-depth=1 | sort -h    # biggest directory, repeat deeper
+sudo find / -xdev -type f -size +500M    # large files
+sudo lsof +L1                            # deleted files held open
+```
+
+Optional sixth: `journalctl --disk-usage` for bloated logs.
+
+Fixes:
+
+- Truncate a huge log instead of deleting it (a process may still hold it open): `sudo truncate -s 0 /var/log/big.log`
+- Rotate logs, or vacuum the journal: `sudo journalctl --vacuum-size=200M`
+- Clear package caches (for example `sudo apt clean`).
+- Restart the process holding deleted files.
+- Then add logrotate and monitoring to prevent a repeat.
+
+---
+
+## Lab Exercises (Day 4)
+
+- [ ] Run `df -h` and `lsblk`. Identify the root filesystem and its type.
+- [ ] Create a 1 GB file with `fallocate -l 1G /tmp/big.img`. Watch `df -h`, find it with `find`, delete it. (On systems where `/tmp` is `tmpfs`, this uses RAM, so use a disk-backed folder such as `/var/tmp`.)
+- [ ] Fill a small loop-mounted filesystem and practise `df` → `du` → `find` → delete:
+
+  ```bash
+  truncate -s 100M /var/tmp/disk.img            # 100 MB image file
+  mkfs.ext4 -F /var/tmp/disk.img                # filesystem inside the file
+  sudo mkdir /mnt/small
+  sudo mount -o loop /var/tmp/disk.img /mnt/small
+  sudo fallocate -l 90M /mnt/small/fill.bin     # nearly fill it
+  df -h /mnt/small
+  # clean up
+  sudo umount /mnt/small && rm /var/tmp/disk.img
+  ```
+
+- [ ] Hold a deleted file open (`sleep 1000 < /var/tmp/big.img &`, then `rm /var/tmp/big.img`). Confirm `df` still shows the space used, find it with `sudo lsof +L1`, and kill the process to free it.
+- [ ] Run `yes > /dev/null &` and watch `uptime` and `vmstat 2`. Kill it.
+- [ ] Explain `free` vs `available` in my own words.
+- [ ] Check `df -i` and explain what causes a full disk with free space.
+
+## Self-Check Questions (Day 4)
+
+1. A server is at 100% disk. What are your first five commands?
+2. `df` says the disk is full but `du` shows much less. Why?
+3. What is the difference between `free` and `available` memory?
+4. Load average is 8 on a 4-core machine. What does it mean?
+5. What does a high `wa` tell you?
+6. Why use UUIDs in `/etc/fstab`?
+
+## Pass Condition (Day 4)
+
+I can find what is filling a disk, tell whether a slow server is short of CPU, memory or disk I/O, and explain the numbers.
+
+## Lessons Learned
+
+- Read the question first, then pick commands for that resource (disk, CPU or memory).
+- `df` and `du` can disagree. The usual cause is a deleted file still held open.
+- Look at `available` memory, not `free`.
+
+---
+
+## Quick Reference (Day 4)
+
+| Task | Command |
+|------|---------|
+| Space per filesystem | `df -h` |
+| Inode usage | `df -i` |
+| Size of a directory | `du -sh dir` |
+| Biggest directories | `sudo du -xh / --max-depth=1 \| sort -h` |
+| Find large files | `sudo find / -xdev -type f -size +500M` |
+| Deleted files held open | `sudo lsof +L1` |
+| List disks and mounts | `lsblk -f`, `findmnt` |
+| Get UUIDs | `sudo blkid` |
+| Test fstab | `sudo mount -a` |
+| Memory | `free -h` (read `available`) |
+| Load and cores | `uptime`, `nproc` |
+| System activity | `vmstat 2 5` |
+| Disk I/O per device | `iostat -x 2` |
+| Journal size | `journalctl --disk-usage` |
+
+---
+
+**Previous:** Day 3: Processes, Signals, Services and Logs
+**Next:** Day 5: Networking (ports, DNS, SSH, `curl`, `ip`, `ss`, firewall basics)
